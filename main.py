@@ -106,4 +106,46 @@ def update_status(subscription_id: int, new_status: str):
     conn.commit()
     return updated    
         
-    # Step 4: return confirmation
+@app.post("/invoices/{invoices_id}/pay")
+def pay_invoices(invoice_id: int, idempotency_key: str):
+    conn = get_db()
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+    # Step 1: check idempotency key
+    cursor.execute(
+        "SELECT result FROM idempotency_keys WHERE idempotency_key = %s",
+        (idempotency_key,)
+    )
+    existing_key = cursor.fetchone()
+    if existing_key:
+        return {"message": "Already processed", "result": existing_key['result']}
+    
+    # Step 2: check invoice exists
+    cursor.execute("SELECT * FROM invoices WHERE id = %s", (invoice_id,))
+    invoice = cursor.fetchone()
+    if not invoice:
+        return {"error": "Invoice not found"}
+    
+    # Step 3: check not already paid
+    if invoice['status'] == 'PAID':
+        return {"error": "Invoice already paid"}
+
+    # Step 4: mark as paid + store idempotency key atomically
+    try:
+        cursor.execute(
+            "UPDATE invoices SET status = 'PAID', paid_at = NOW() WHERE id = %s RETURNING *",
+            (invoice_id,)
+        )
+        paid_invoice = cursor.fetchone()
+        
+        cursor.execute(
+            "INSERT INTO idempotency_keys (idempotency_key, user_id, result) VALUES (%s, %s, %s)",
+            (idempotency_key, invoice['user_id'], str(paid_invoice))
+        )
+        
+        conn.commit()
+        return {"message": "Payment successful", "invoice": paid_invoice}
+    
+    except Exception as e:
+        conn.rollback()
+        return {"error": str(e)}
